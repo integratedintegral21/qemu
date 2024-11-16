@@ -194,7 +194,8 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_PARAM_SERV] = "virtio-param-serv",
     [VIRTIO_ID_AUDIO_POLICY] = "virtio-audio-pol",
     [VIRTIO_ID_BT] = "virtio-bluetooth",
-    [VIRTIO_ID_GPIO] = "virtio-gpio"
+    [VIRTIO_ID_GPIO] = "virtio-gpio",
+    [VIRTIO_ID_MEMSPLIT] = "virtio-memsplit"
 };
 
 static const char *virtio_id_to_name(uint16_t device_id)
@@ -3451,7 +3452,7 @@ void virtio_init(VirtIODevice *vdev, uint16_t device_id, size_t config_size)
     int i;
     int nvectors = k->query_nvectors ? k->query_nvectors(qbus->parent) : 0;
 
-    if (nvectors) {
+    if (nvectors > 0) {
         vdev->vector_queues =
             g_malloc0(sizeof(*vdev->vector_queues) * nvectors);
     }
