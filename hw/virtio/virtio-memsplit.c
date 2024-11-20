@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qapi/error.h"
 #include "hw/qdev-properties.h"
 
 #include "standard-headers/linux/virtio_ids.h"
@@ -18,33 +19,75 @@ static const VMStateDescription vmstate_virtio_memsplit = {
     },
 };
 
-static void virtio_memsplit_handle_output(VirtIODevice *vdev, VirtQueue *vq)
-{
-    VirtQueueElement *elem;
+static VirtIOMemSplitReq *virtio_memsplit_get_request(VirtIOMemSplit *s, VirtQueue *vq) {
+    VirtIOMemSplitReq *req = virtqueue_pop(vq, sizeof(VirtIOMemSplitReq));
+    if (req) {
+        req->vq = vq;
+        req->dev = s;
+    }
+    return req;
+}
+
+static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
+    g_free(req);
+}
+
+static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
+    qemu_log("QEMU timer callback");
+}
+
+static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
     int i;
-    qemu_log("virtio memsplit vq handler\n");
+    VirtIOMemSplit *s = req->dev;
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
-    // Process all available buffers
-    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
-        // Assume a single buffer in the request
-        char *buf = elem->out_sg[0].iov_base;
-        size_t len = elem->out_sg[0].iov_len;
+    qemu_log("Request handler called\n");
+    char *buf = req->elem.out_sg[0].iov_base;
+    size_t len = req->elem.out_sg[0].iov_len;
+    qemu_log("Received request of size %zu\n", len);
+    for (i = 0; i < len; i++) {
+        qemu_log("%d: %x\n", i, (int)(buf[i]));
+    }
 
-        // Handle the request
-        qemu_log("Received request of size %zu\n", len);
+    virtqueue_push(req->vq, &req->elem, 0);
+    virtio_notify(vdev, req->vq);
 
-        // For this example, just print the data
-        for (i = 0; i < len; i++) {
-            qemu_log("%d: %x\n", i, (int)(buf[i]));
+    QEMUTimer *timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, vdev);
+    timer_mod(timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
+
+    virtio_memsplit_free_request(req);
+
+    return 0;
+}
+
+void virtio_memsplit_handle_vq(VirtIOMemSplit *s, VirtQueue *vq) {
+    VirtIOMemSplitReq *req;
+
+    bool suppress_notifications = virtio_queue_get_notification(vq);
+
+    do {
+        if (suppress_notifications) {
+            virtio_queue_set_notification(vq, 0);
         }
 
-        // Return the buffer to the guest
-        virtqueue_push(vq, elem, 0);
-        virtio_notify(vdev, vq);
+        while ((req = virtio_memsplit_get_request(s, vq))) {
+            if (virtio_memsplit_handle_request(req)) {
+                virtqueue_detach_element(req->vq, &req->elem, 0);
+                virtio_memsplit_free_request(req);
+                break;
+            }
+        }
+        if (suppress_notifications) {
+            virtio_queue_set_notification(vq, 1);
+        }
+    } while (!virtio_queue_empty(vq));
 
-        // Free the element
-        // virtqueue_elem_cleanup(&elem, NULL);
-    }
+}
+
+static void virtio_memsplit_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+{
+    VirtIOMemSplit *s = (VirtIOMemSplit *)vdev;
+    virtio_memsplit_handle_vq(s, vq);
 }
 
 static uint64_t virtio_memsplit_get_features(VirtIODevice *vdev, uint64_t features, 
@@ -53,12 +96,23 @@ static uint64_t virtio_memsplit_get_features(VirtIODevice *vdev, uint64_t featur
     qemu_log("virtio memsplit get features\n");
     return features;
 }
+
 static void virtio_memsplit_realize(DeviceState *dev, Error **errp) 
 {
-
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    // VirtIOMemSplit *ms = VIRTIO_MEMSPLIT(dev);
+    // int ret;
+
+    qemu_log("virtio memsplit vq handler\n");
+    // ret = event_notifier_init(&ms->irqfd, 0);
+    // if (ret) {
+    //     error_setg(errp, "Failed to initialize event notifier");
+    //     return;
+    // }
+
     virtio_init(vdev, VIRTIO_ID_MEMSPLIT, 0);
     virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_output);
+
     qemu_log("virtio memsplit realize\n");
 }
 
