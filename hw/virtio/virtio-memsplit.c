@@ -2,6 +2,7 @@
 #include "qemu/log.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
+#include "hw/virtio/virtio-bus.h"
 
 #include "standard-headers/linux/virtio_ids.h"
 
@@ -33,13 +34,19 @@ static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
 }
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
-    qemu_log("QEMU timer callback");
+    qemu_log("QEMU timer callback\n");
+    VirtIOMemSplitReq *req = opaque;
+    VirtIOMemSplit *s = req->dev;
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+
+    virtio_notify_irqfd(vdev, req->vq);
+    virtio_memsplit_free_request(req);
 }
 
 static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
     int i;
-    VirtIOMemSplit *s = req->dev;
-    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    // VirtIOMemSplit *s = req->dev;
+    // VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
     qemu_log("Request handler called\n");
     char *buf = req->elem.out_sg[0].iov_base;
@@ -50,12 +57,9 @@ static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
     }
 
     virtqueue_push(req->vq, &req->elem, 0);
-    virtio_notify(vdev, req->vq);
-
-    QEMUTimer *timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, vdev);
+    
+    QEMUTimer *timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, req);
     timer_mod(timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
-
-    virtio_memsplit_free_request(req);
 
     return 0;
 }
@@ -129,6 +133,37 @@ static void virtio_instance_init(Object *obj)
     qemu_log("virtio memsplit instance init\n");
 }
 
+static int virtio_memsplit_start_ioeventfd(VirtIODevice *vdev)
+{
+    qemu_log("virtio memsplit start ioeventfd\n");
+    
+    int r;
+    VirtIOMemSplit *s = VIRTIO_MEMSPLIT(vdev);
+    BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(s)));
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
+    r = k->set_guest_notifiers(qbus->parent, 1, true);
+    if (r != 0) {
+        error_report("virtio-blk failed to set guest notifier (%d), "
+                     "ensure -accel kvm is set.", r);
+        return -ENOSYS;
+    }
+
+    r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), 0, true);
+    if (r != 0) {
+        error_report("virtio-blk failed to set host notifier (%d), "
+                     "ensure -accel kvm is set.", r);
+        return -ENOSYS;
+    }
+
+    qemu_log("virtio memsplit start ioeventfd done\n");
+    return 0;
+}
+
+static void virtio_memsplit_stop_ioeventfd(VirtIODevice *vdev)
+{
+    qemu_log("virtio memsplit stop ioeventfd\n");
+}
+
 static void virtio_memsplit_init(ObjectClass *klass, void *data) 
 {
     qemu_log("virtio memsplit init\n");
@@ -140,6 +175,8 @@ static void virtio_memsplit_init(ObjectClass *klass, void *data)
     vdc->realize = virtio_memsplit_realize;
     vdc->unrealize = virtio_memsplit_unrealize;
     vdc->get_features = virtio_memsplit_get_features;
+    vdc->start_ioeventfd = virtio_memsplit_start_ioeventfd;
+    vdc->stop_ioeventfd = virtio_memsplit_stop_ioeventfd;
 }
 
 static const TypeInfo virtio_memsplit_info = 
