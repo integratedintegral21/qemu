@@ -19,6 +19,7 @@ struct VirtIOMemSplit {
     uint64_t flags;
     struct VirtIOMemSplitReq *rq;
     EventNotifier irqfd;
+    QEMUTimer *timer;
 };
 
 typedef struct VirtIOMemSplitReq {

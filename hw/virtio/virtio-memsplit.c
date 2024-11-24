@@ -35,31 +35,45 @@ static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
     qemu_log("QEMU timer callback\n");
-    VirtIOMemSplitReq *req = opaque;
-    VirtIOMemSplit *s = req->dev;
+    VirtIOMemSplit *s = opaque;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
-    virtio_notify_irqfd(vdev, req->vq);
-    virtio_memsplit_free_request(req);
+    virtio_notify_config(vdev);
+
+    timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
 }
 
 static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
     int i;
-    // VirtIOMemSplit *s = req->dev;
-    // VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    VirtIOMemSplit *s = req->dev;
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
     qemu_log("Request handler called\n");
-    char *buf = req->elem.out_sg[0].iov_base;
-    size_t len = req->elem.out_sg[0].iov_len;
-    qemu_log("Received request of size %zu\n", len);
-    for (i = 0; i < len; i++) {
-        qemu_log("%d: %x\n", i, (int)(buf[i]));
+    if (req->elem.out_num > 0) {
+        char *buf = req->elem.out_sg[0].iov_base;
+        size_t len = req->elem.out_sg[0].iov_len;
+        qemu_log("Received request of size %zu\n", len);
+        for (i = 0; i < len; i++) {
+            qemu_log("%d: %x\n", i, (int)(buf[i]));
+        }
     }
 
-    virtqueue_push(req->vq, &req->elem, 0);
-    
-    QEMUTimer *timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, req);
-    timer_mod(timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
+    if (req->elem.in_num > 0) {
+        void *buf = req->elem.in_sg[0].iov_base;
+        size_t buf_len = req->elem.in_sg[0].iov_len;
+        qemu_log("Sending request of size %zu\n", buf_len);
+
+        const char *res_data = "Hello, driver!";
+        size_t res_data_len = strlen(res_data) + 1;  // terminated with \0
+
+        res_data_len = res_data_len > buf_len ? buf_len : res_data_len;  // Truncate if necessary
+        memcpy(buf, (void*)res_data, res_data_len);
+
+        virtqueue_push(req->vq, &req->elem, req->elem.in_num);
+        virtio_notify(vdev, req->vq);
+    }
+
+    virtio_memsplit_free_request(req);
 
     return 0;
 }
@@ -104,18 +118,21 @@ static uint64_t virtio_memsplit_get_features(VirtIODevice *vdev, uint64_t featur
 static void virtio_memsplit_realize(DeviceState *dev, Error **errp) 
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
-    // VirtIOMemSplit *ms = VIRTIO_MEMSPLIT(dev);
-    // int ret;
+    VirtIOMemSplit *ms = VIRTIO_MEMSPLIT(dev);
+    int ret;
 
     qemu_log("virtio memsplit vq handler\n");
-    // ret = event_notifier_init(&ms->irqfd, 0);
-    // if (ret) {
-    //     error_setg(errp, "Failed to initialize event notifier");
-    //     return;
-    // }
+    ret = event_notifier_init(&ms->irqfd, 0);
+    if (ret) {
+        error_setg(errp, "Failed to initialize event notifier");
+        return;
+    }
 
     virtio_init(vdev, VIRTIO_ID_MEMSPLIT, 0);
     virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_output);
+
+    ms->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, ms);
+    timer_mod(ms->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
 
     qemu_log("virtio memsplit realize\n");
 }
@@ -143,14 +160,16 @@ static int virtio_memsplit_start_ioeventfd(VirtIODevice *vdev)
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
     r = k->set_guest_notifiers(qbus->parent, 1, true);
     if (r != 0) {
-        error_report("virtio-blk failed to set guest notifier (%d), "
+        qemu_log("virtio-memsplit failed to set guest notifier\n");
+        error_report("virtio-memsplit failed to set guest notifier (%d), "
                      "ensure -accel kvm is set.", r);
         return -ENOSYS;
     }
 
     r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), 0, true);
     if (r != 0) {
-        error_report("virtio-blk failed to set host notifier (%d), "
+        qemu_log("virtio-memsplit failed to set host notifier\n");
+        error_report("virtio-memsplit failed to set host notifier (%d), "
                      "ensure -accel kvm is set.", r);
         return -ENOSYS;
     }
