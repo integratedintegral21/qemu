@@ -28,6 +28,11 @@ typedef struct VirtIOMemSplitReq {
     VirtQueue *vq;
 } VirtIOMemSplitReq;
 
+typedef struct VirtIOMemSplitData {
+    uint32_t size;
+    char data[0];
+} VirtIOMemSplitData;
+
 void virtio_memsplit_handle_vq(VirtIOMemSplit *s, VirtQueue *vq);
 
 #define TYPE_VIRTIO_MEMSPLIT_PCI "virtio-memsplit-pci-base"

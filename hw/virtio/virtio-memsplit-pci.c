@@ -1,5 +1,5 @@
 /*
- * Virtio blk PCI Bindings
+ * Virtio memsplit PCI Bindings
  *
  * Copyright IBM, Corp. 2007
  * Copyright (c) 2009 CodeSourcery
@@ -30,7 +30,7 @@
 typedef struct VirtIOMemsplitPCI VirtIOMemsplitPCI;
 
 /*
- * virtio-blk-pci: This extends VirtioPCIProxy.
+ * virtio-memsplit-pci: This extends VirtioPCIProxy.
  */
 #define TYPE_VIRTIO_MEMSPLIT_PCI "virtio-memsplit-pci-base"
 DECLARE_INSTANCE_CHECKER(VirtIOMemsplitPCI, VIRTIO_MEMSPLIT_PCI,
@@ -54,6 +54,8 @@ static void virtio_memsplit_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 {
     VirtIOMemsplitPCI *dev = VIRTIO_MEMSPLIT_PCI(vpci_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
+
+    vpci_dev->nvectors = 2;
 
     virtio_pci_force_virtio_1(vpci_dev);
     qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
