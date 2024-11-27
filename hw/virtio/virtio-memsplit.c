@@ -3,6 +3,10 @@
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-bus.h"
+#include "exec/cpu-common.h"  
+#include "exec/address-spaces.h"
+#include "exec/ramlist.h"
+#include "exec/ramblock.h"
 
 #include "standard-headers/linux/virtio_ids.h"
 
@@ -33,6 +37,49 @@ static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
     g_free(req);
 }
 
+static void init_ram_info(VirtIOMemSplit *ms) {
+    MemoryRegion *sys_mr = get_system_memory();
+    MemoryRegion *subregion;
+    qemu_log("System memory subregions:\n");
+
+    ms->below_4g_ram = NULL;
+    ms->above_4g_ram = NULL;
+    QTAILQ_FOREACH(subregion, &sys_mr->subregions, subregions_link) {
+        if (strcmp(subregion->name, "ram-below-4g") == 0) {
+            qemu_log("Found %s memory region\n", subregion->name);
+
+            hwaddr gpa_start = subregion->addr;
+            hwaddr gpa_end   = gpa_start + subregion->size - 1;
+            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
+            qemu_log("Alias offset: 0x%lx\n", subregion->alias_offset);
+
+            uint8_t *hva_start = memory_region_get_ram_ptr(subregion);
+            uint8_t *hva_end   = hva_start + subregion->size - 1;
+            qemu_log("Subregion hva range: %p - %p\n", hva_start, hva_end);
+
+            ms->below_4g_ram = subregion;
+            ms->hva_ram_start_ptr = hva_start;
+            ms->hva_ram_size = subregion->size;
+        }
+
+        if (strcmp(subregion->name, "ram-above-4g") == 0) {
+            qemu_log("Found %s memory region\n", subregion->name);
+
+            hwaddr gpa_start = subregion->addr;
+            hwaddr gpa_end   = gpa_start + subregion->size - 1;
+            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
+            qemu_log("Alias offset: 0x%lx\n", subregion->alias_offset);
+
+            uint8_t *hva_start = memory_region_get_ram_ptr(subregion);
+            uint8_t *hva_end   = hva_start + subregion->size - 1;
+            qemu_log("Subregion hva range: %p - %p\n", hva_start, hva_end);
+
+            ms->above_4g_ram = subregion;
+            ms->hva_ram_size += subregion->size;
+        }
+    }
+}
+
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
     qemu_log("QEMU timer callback\n");
     VirtIOMemSplit *s = opaque;
@@ -40,7 +87,7 @@ static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
 
     virtio_notify_config(vdev);
 
-    timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+    // timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
 }
 
 static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
@@ -118,7 +165,13 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     VirtIOMemSplit *ms = VIRTIO_MEMSPLIT(dev);
     int ret;
 
-    qemu_log("virtio memsplit vq handler\n");
+    init_ram_info(ms);
+
+    if (!ms->below_4g_ram) {
+        error_setg(errp, "Failed to initialize RAM regions");
+        return;
+    }
+
     ret = event_notifier_init(&ms->irqfd, 0);
     if (ret) {
         error_setg(errp, "Failed to initialize event notifier");

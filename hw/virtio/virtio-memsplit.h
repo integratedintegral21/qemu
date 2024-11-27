@@ -20,6 +20,13 @@ struct VirtIOMemSplit {
     struct VirtIOMemSplitReq *rq;
     EventNotifier irqfd;
     QEMUTimer *timer;
+
+    // RAM utils
+    uint8_t *hva_ram_start_ptr;
+    uint64_t hva_ram_size;
+    
+    MemoryRegion *below_4g_ram;
+    MemoryRegion *above_4g_ram;
 };
 
 typedef struct VirtIOMemSplitReq {
