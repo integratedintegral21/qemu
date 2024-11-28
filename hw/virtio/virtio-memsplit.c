@@ -14,6 +14,10 @@
 
 #define QUEUE_SIZE 16
 
+#define PAGE_BITS        12
+#define PAGE_SIZE        (1 << PAGE_BITS)
+#define PAGE_OFFSET_MASK (PAGE_SIZE - 1) 
+
 static const VMStateDescription vmstate_virtio_memsplit = {
     .name = "virtio-memsplit",
     .minimum_version_id = 9,
@@ -23,6 +27,10 @@ static const VMStateDescription vmstate_virtio_memsplit = {
         VMSTATE_END_OF_LIST()
     },
 };
+
+static inline bool is_page_aligned(void *ptr) {
+    return ((uint64_t)ptr) && PAGE_OFFSET_MASK == 0;
+}
 
 static VirtIOMemSplitReq *virtio_memsplit_get_request(VirtIOMemSplit *s, VirtQueue *vq) {
     VirtIOMemSplitReq *req = virtqueue_pop(vq, sizeof(VirtIOMemSplitReq));
@@ -85,6 +93,9 @@ static hwaddr hva2gpa(VirtIOMemSplit *ms, uint8_t *ptr) {
     MemoryRegion *mr;
     
     size_t offset_in_region = ptr - ms->hva_ram_start_ptr;
+    if (offset_in_region >= ms->hva_ram_size) {
+        return 0;
+    }
     if (offset_in_region < ms->below_4g_ram->size) {
         mr = ms->below_4g_ram;
     } else {
@@ -93,6 +104,32 @@ static hwaddr hva2gpa(VirtIOMemSplit *ms, uint8_t *ptr) {
     }
 
     return mr->addr + offset_in_region;  // Linear mapping;
+}
+
+static void save_hva2gpa(VirtIOMemSplit *ms, const char *fname) {
+    FILE    *fptr;
+    size_t   offset;
+    uint8_t *start_ptr = ms->hva_ram_start_ptr;
+    size_t   hva_size  = ms->hva_ram_size;
+
+    if (is_page_aligned(start_ptr)) {
+        qemu_log("Start hva %p is not page-aligned\n", start_ptr);
+    }
+
+    fptr = fopen(fname, "w");
+    if (fptr == NULL) {
+        qemu_log("Failed to save hva-gpa table\n");
+        return;
+    }
+
+    for (offset = 0; offset < hva_size; offset += PAGE_SIZE) {
+        uint8_t *hva = start_ptr + offset;
+        hwaddr   gpa = hva2gpa(ms, hva);
+        fprintf(fptr, "%p,0x%lx\n", hva, gpa);
+    }
+    fclose(fptr);
+
+    qemu_log("hva2gpa map saved");
 }
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
@@ -181,6 +218,8 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     int ret;
 
     init_ram_info(ms);
+
+    save_hva2gpa(ms, "hva2gpa.txt");
 
     if (!ms->below_4g_ram) {
         error_setg(errp, "Failed to initialize RAM regions");
