@@ -44,6 +44,7 @@ static void init_ram_info(VirtIOMemSplit *ms) {
 
     ms->below_4g_ram = NULL;
     ms->above_4g_ram = NULL;
+    ms->hva_ram_size = 0;
     QTAILQ_FOREACH(subregion, &sys_mr->subregions, subregions_link) {
         if (strcmp(subregion->name, "ram-below-4g") == 0) {
             qemu_log("Found %s memory region\n", subregion->name);
@@ -59,7 +60,7 @@ static void init_ram_info(VirtIOMemSplit *ms) {
 
             ms->below_4g_ram = subregion;
             ms->hva_ram_start_ptr = hva_start;
-            ms->hva_ram_size = subregion->size;
+            ms->hva_ram_size += subregion->size;
         }
 
         if (strcmp(subregion->name, "ram-above-4g") == 0) {
@@ -78,6 +79,20 @@ static void init_ram_info(VirtIOMemSplit *ms) {
             ms->hva_ram_size += subregion->size;
         }
     }
+}
+
+static hwaddr hva2gpa(VirtIOMemSplit *ms, uint8_t *ptr) {
+    MemoryRegion *mr;
+    
+    size_t offset_in_region = ptr - ms->hva_ram_start_ptr;
+    if (offset_in_region < ms->below_4g_ram->size) {
+        mr = ms->below_4g_ram;
+    } else {
+        mr = ms->above_4g_ram;
+        offset_in_region = ptr - (uint8_t*) memory_region_get_ram_ptr(ms->above_4g_ram);
+    }
+
+    return mr->addr + offset_in_region;  // Linear mapping;
 }
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
