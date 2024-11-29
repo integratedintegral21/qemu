@@ -45,91 +45,112 @@ static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
     g_free(req);
 }
 
-static void init_ram_info(VirtIOMemSplit *ms) {
-    MemoryRegion *sys_mr = get_system_memory();
-    MemoryRegion *subregion;
-    qemu_log("System memory subregions:\n");
+static void *gpa2hva(hwaddr addr, uint64_t size, Error **errp) {
+    Int128 gpa_region_size;
+    MemoryRegionSection mrs = memory_region_find(get_system_memory(),
+                                                 addr, size);
 
-    ms->below_4g_ram = NULL;
-    ms->above_4g_ram = NULL;
-    ms->hva_ram_size = 0;
-    QTAILQ_FOREACH(subregion, &sys_mr->subregions, subregions_link) {
-        if (strcmp(subregion->name, "ram-below-4g") == 0) {
-            qemu_log("Found %s memory region\n", subregion->name);
-
-            hwaddr gpa_start = subregion->addr;
-            hwaddr gpa_end   = gpa_start + subregion->size - 1;
-            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
-            qemu_log("Alias offset: 0x%lx\n", subregion->alias_offset);
-
-            uint8_t *hva_start = memory_region_get_ram_ptr(subregion);
-            uint8_t *hva_end   = hva_start + subregion->size - 1;
-            qemu_log("Subregion hva range: %p - %p\n", hva_start, hva_end);
-
-            ms->below_4g_ram = subregion;
-            ms->hva_ram_start_ptr = hva_start;
-            ms->hva_ram_size += subregion->size;
-        }
-
-        if (strcmp(subregion->name, "ram-above-4g") == 0) {
-            qemu_log("Found %s memory region\n", subregion->name);
-
-            hwaddr gpa_start = subregion->addr;
-            hwaddr gpa_end   = gpa_start + subregion->size - 1;
-            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
-            qemu_log("Alias offset: 0x%lx\n", subregion->alias_offset);
-
-            uint8_t *hva_start = memory_region_get_ram_ptr(subregion);
-            uint8_t *hva_end   = hva_start + subregion->size - 1;
-            qemu_log("Subregion hva range: %p - %p\n", hva_start, hva_end);
-
-            ms->above_4g_ram = subregion;
-            ms->hva_ram_size += subregion->size;
-        }
+    if (!mrs.mr) {
+        error_setg(errp, "No memory is mapped at address 0x%" HWADDR_PRIx, addr);
+        return NULL;
     }
+
+    if (!memory_region_is_ram(mrs.mr) && !memory_region_is_romd(mrs.mr)) {
+        error_setg(errp, "Memory at address 0x%" HWADDR_PRIx " is not RAM", addr);
+        memory_region_unref(mrs.mr);
+        return NULL;
+    }
+
+    gpa_region_size = int128_make64(size);
+    if (int128_lt(mrs.size, gpa_region_size)) {
+        error_setg(errp, "Size of memory region at 0x%" HWADDR_PRIx
+                   " exceeded.", addr);
+        memory_region_unref(mrs.mr);
+        return NULL;
+    }
+    return qemu_map_ram_ptr(mrs.mr->ram_block, mrs.offset_within_region);
 }
 
-static hwaddr hva2gpa(VirtIOMemSplit *ms, uint8_t *ptr) {
-    MemoryRegion *mr;
-    
-    size_t offset_in_region = ptr - ms->hva_ram_start_ptr;
-    if (offset_in_region >= ms->hva_ram_size) {
+static uint64_t vtop(void *ptr, Error **errp)
+{
+    uint64_t pinfo;
+    uint64_t ret = -1;
+    uintptr_t addr = (uintptr_t) ptr;
+    uintptr_t pagesize = qemu_real_host_page_size();
+    off_t offset = addr / pagesize * sizeof(pinfo);
+    int fd;
+
+    fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd == -1) {
+        error_setg_errno(errp, errno, "Cannot open /proc/self/pagemap");
+        return -1;
+    }
+
+    /* Force copy-on-write if necessary.  */
+    qatomic_add((uint8_t *)ptr, 0);
+
+    if (pread(fd, &pinfo, sizeof(pinfo), offset) != sizeof(pinfo)) {
+        error_setg_errno(errp, errno, "Cannot read pagemap");
+        goto out;
+    }
+    if ((pinfo & (1ull << 63)) == 0) {
+        error_setg(errp, "Page not present");
+        goto out;
+    }
+    ret = ((pinfo & 0x007fffffffffffffull) * pagesize) | (addr & (pagesize - 1));
+
+out:
+    close(fd);
+    return ret;
+}
+
+static uint64_t gpa2hpa(hwaddr gpa, Error **errp) {
+    void *hva = gpa2hva(gpa, 1, errp);
+    if (hva == NULL) {
         return 0;
     }
-    if (offset_in_region < ms->below_4g_ram->size) {
-        mr = ms->below_4g_ram;
-    } else {
-        mr = ms->above_4g_ram;
-        offset_in_region = ptr - (uint8_t*) memory_region_get_ram_ptr(ms->above_4g_ram);
-    }
 
-    return mr->addr + offset_in_region;  // Linear mapping;
+    return vtop(hva, errp);
 }
 
-static void save_hva2gpa(VirtIOMemSplit *ms, const char *fname) {
-    FILE    *fptr;
-    size_t   offset;
-    uint8_t *start_ptr = ms->hva_ram_start_ptr;
-    size_t   hva_size  = ms->hva_ram_size;
+static void init_ram_info(VirtIOMemSplit *ms) {
+    qemu_log("System memory subregions:\n");
 
-    if (is_page_aligned(start_ptr)) {
-        qemu_log("Start hva %p is not page-aligned\n", start_ptr);
+    RAMBlock *blk;
+    MemoryRegion *mr;
+    MemoryRegion *sub_mr;
+
+    ms->hva_ram_start_ptr = NULL;
+    ms->hva_ram_size = 0;
+    QLIST_FOREACH(blk, &ram_list.blocks, next) {
+        mr = blk->mr;
+        if (strcmp(mr->name, "pc.ram") == 0) {
+            ms->hva_ram_start_ptr = memory_region_get_ram_ptr(mr);
+            ms->hva_ram_size = mr->size;
+            break;
+        }
     }
 
-    fptr = fopen(fname, "w");
-    if (fptr == NULL) {
-        qemu_log("Failed to save hva-gpa table\n");
-        return;
-    }
+    // Walk over system memory and insert valid GPA ranges into 
+    // ms object
+    mr = get_system_memory();
+    QLIST_INIT(&ms->gpa_ranges);
+    QTAILQ_FOREACH(sub_mr, &mr->subregions, subregions_link) {
+        if (strcmp(sub_mr->name, "ram-below-4g") == 0 ||
+            strcmp(sub_mr->name, "ram-above-4g") == 0) {
+            qemu_log("Found %s memory region\n", sub_mr->name);
 
-    for (offset = 0; offset < hva_size; offset += PAGE_SIZE) {
-        uint8_t *hva = start_ptr + offset;
-        hwaddr   gpa = hva2gpa(ms, hva);
-        fprintf(fptr, "%p,0x%lx\n", hva, gpa);
-    }
-    fclose(fptr);
+            hwaddr gpa_start = sub_mr->addr;
+            hwaddr gpa_end   = gpa_start + sub_mr->size - 1;
+            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
 
-    qemu_log("hva2gpa map saved");
+            GPARange *gpa_range = malloc(sizeof(GPARange));
+            gpa_range->start = gpa_start;
+            gpa_range->size = sub_mr->size;
+
+            QLIST_INSERT_HEAD(&ms->gpa_ranges, gpa_range, next);
+        }
+    }
 }
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
@@ -215,15 +236,33 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VirtIOMemSplit *ms = VIRTIO_MEMSPLIT(dev);
+    GPARange *gpa_range;
     int ret;
 
     init_ram_info(ms);
 
-    save_hva2gpa(ms, "hva2gpa.txt");
-
-    if (!ms->below_4g_ram) {
-        error_setg(errp, "Failed to initialize RAM regions");
+    if (ms->hva_ram_size == 0) {
+        error_setg(errp, "Could not find guest RAM region(s)");
         return;
+    }
+
+    // Test mappings
+    qemu_log("gpa sectors:\n");
+    QLIST_FOREACH(gpa_range, &ms->gpa_ranges, next) {
+        hwaddr gpa_start = gpa_range->start;
+        hwaddr gpa_end = gpa_range->start + gpa_range->size - 1;
+        qemu_log("GPA: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
+        qemu_log("HVA: %p - %p\n", gpa2hva(gpa_start, 1, errp), gpa2hva(gpa_end, 1, errp));
+        if (*errp) {
+            error_setg(errp, "Failed to map GPA to HPA");
+            return;
+        }
+
+        qemu_log("HPA: 0x%lx - 0x%lx\n", gpa2hpa(gpa_start, errp), gpa2hpa(gpa_end, errp));
+        if (*errp) {
+            error_setg(errp, "Failed to map GPA to HPA");
+            return;
+        }
     }
 
     ret = event_notifier_init(&ms->irqfd, 0);

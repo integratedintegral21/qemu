@@ -3,7 +3,9 @@
 
 #include "qemu/osdep.h"
 
+#include "qemu/queue.h"
 #include "qemu/units.h"
+
 #include "hw/virtio/virtio.h"
 #include "net/announce.h"
 #include "qemu/option_int.h"
@@ -14,6 +16,8 @@
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMemSplit, VIRTIO_MEMSPLIT)
 
 struct VirtIOMemSplitReq;
+struct GPARange;
+
 struct VirtIOMemSplit {
     VirtIODevice parent_obj;
     uint64_t flags;
@@ -24,9 +28,7 @@ struct VirtIOMemSplit {
     // RAM utils
     uint8_t *hva_ram_start_ptr;
     uint64_t hva_ram_size;
-    
-    MemoryRegion *below_4g_ram;
-    MemoryRegion *above_4g_ram;
+    QLIST_HEAD(, GPARange) gpa_ranges;
 };
 
 typedef struct VirtIOMemSplitReq {
@@ -39,6 +41,13 @@ typedef struct VirtIOMemSplitData {
     uint32_t size;
     char data[0];
 } VirtIOMemSplitData;
+
+typedef struct GPARange {
+    hwaddr start;
+    size_t size;
+
+    QLIST_ENTRY(GPARange) next;
+} GPARange;
 
 void virtio_memsplit_handle_vq(VirtIOMemSplit *s, VirtQueue *vq);
 
