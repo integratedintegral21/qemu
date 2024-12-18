@@ -114,27 +114,15 @@ static uint64_t gpa2hpa(hwaddr gpa, Error **errp) {
 }
 
 static void init_ram_info(VirtIOMemSplit *ms) {
-    qemu_log("System memory subregions:\n");
-
-    RAMBlock *blk;
     MemoryRegion *mr;
     MemoryRegion *sub_mr;
-
-    ms->hva_ram_start_ptr = NULL;
-    ms->hva_ram_size = 0;
-    QLIST_FOREACH(blk, &ram_list.blocks, next) {
-        mr = blk->mr;
-        if (strcmp(mr->name, "pc.ram") == 0) {
-            ms->hva_ram_start_ptr = memory_region_get_ram_ptr(mr);
-            ms->hva_ram_size = mr->size;
-            break;
-        }
-    }
 
     // Walk over system memory and insert valid GPA ranges into 
     // ms object
     mr = get_system_memory();
     QLIST_INIT(&ms->gpa_ranges);
+
+    qemu_log("System memory subregions:\n");
     QTAILQ_FOREACH(sub_mr, &mr->subregions, subregions_link) {
         if (strcmp(sub_mr->name, "ram-below-4g") == 0 ||
             strcmp(sub_mr->name, "ram-above-4g") == 0) {
@@ -149,14 +137,53 @@ static void init_ram_info(VirtIOMemSplit *ms) {
             gpa_range->size = sub_mr->size;
 
             QLIST_INSERT_HEAD(&ms->gpa_ranges, gpa_range, next);
+
+            uint8_t *hva = memory_region_get_ram_ptr(sub_mr);
+            qemu_log("Subregion hva range: %p - %p\n", hva, hva + sub_mr->size - 1);
+
+            if (ms->hva_ram_start_ptr == NULL || ms->hva_ram_start_ptr > hva) {
+                ms->hva_ram_start_ptr = hva;
+            }
+            ms->hva_ram_size += sub_mr->size;
         }
     }
 }
 
 static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
-    qemu_log("QEMU timer callback\n");
+    qemu_log("\nQEMU timer callback\n");
     VirtIOMemSplit *s = opaque;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    uint8_t *migrate_start_page = s->hva_ram_start_ptr;
+    uint64_t migrate_len = 1 << 20;
+    uint64_t vm_start = (uint64_t) migrate_start_page;
+    int target_node = 0;
+    uint8_t in_buf[sizeof(vm_start) + sizeof(migrate_len) + sizeof(uint32_t)];
+    *((uint64_t*) in_buf) = vm_start;
+    *((uint64_t*) (in_buf + sizeof(vm_start))) = migrate_len;
+    *((uint32_t*) (in_buf + sizeof(vm_start) + sizeof(migrate_len))) = target_node;
+    int i;
+    qemu_log("start addr: 0x%lx, len: 0x%lx\n", vm_start, migrate_len);
+
+    for (i = 0; i < 32; i++) {
+        Error *err = NULL;
+        void* hva = migrate_start_page + i * (1 << 12);
+        uint64_t hpa = vtop(hva, &err);
+        qemu_log("hva: %p, hpa: 0x%lx\n", hva, hpa);
+    }
+
+    const char *fname = "/dev/migrate_pages";
+    FILE *fptr = fopen(fname, "w");
+    assert(fptr);
+    size_t written_bytes = fwrite(in_buf, 1, sizeof(in_buf), fptr);
+    qemu_log("Written %ld bytes to %s\n", written_bytes, fname);
+    fclose(fptr);
+
+    for (i = 0; i < 32; i++) {
+        Error *err = NULL;
+        void* hva = migrate_start_page + i * (1 << 12);
+        uint64_t hpa = vtop(hva, &err);
+        qemu_log("hva: %p, new hpa: 0x%lx\n", hva, hpa);
+    }
 
     virtio_notify_config(vdev);
 
@@ -275,7 +302,7 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_output);
 
     ms->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, ms);
-    timer_mod(ms->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+    timer_mod(ms->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
 
     qemu_log("virtio memsplit realize\n");
 }
