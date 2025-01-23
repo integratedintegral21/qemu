@@ -153,37 +153,37 @@ static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
     qemu_log("\nQEMU timer callback\n");
     VirtIOMemSplit *s = opaque;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
-    uint8_t *migrate_start_page = s->hva_ram_start_ptr;
-    uint64_t migrate_len = 1 << 20;
-    uint64_t vm_start = (uint64_t) migrate_start_page;
-    int target_node = 0;
-    uint8_t in_buf[sizeof(vm_start) + sizeof(migrate_len) + sizeof(uint32_t)];
-    *((uint64_t*) in_buf) = vm_start;
-    *((uint64_t*) (in_buf + sizeof(vm_start))) = migrate_len;
-    *((uint32_t*) (in_buf + sizeof(vm_start) + sizeof(migrate_len))) = target_node;
-    int i;
-    qemu_log("start addr: 0x%lx, len: 0x%lx\n", vm_start, migrate_len);
+    // uint8_t *migrate_start_page = s->hva_ram_start_ptr;
+    // uint64_t migrate_len = 1 << 20;
+    // uint64_t vm_start = (uint64_t) migrate_start_page;
+    // int target_node = 0;
+    // uint8_t in_buf[sizeof(vm_start) + sizeof(migrate_len) + sizeof(uint32_t)];
+    // *((uint64_t*) in_buf) = vm_start;
+    // *((uint64_t*) (in_buf + sizeof(vm_start))) = migrate_len;
+    // *((uint32_t*) (in_buf + sizeof(vm_start) + sizeof(migrate_len))) = target_node;
+    // int i;
+    // qemu_log("start addr: 0x%lx, len: 0x%lx\n", vm_start, migrate_len);
 
-    for (i = 0; i < 32; i++) {
-        Error *err = NULL;
-        void* hva = migrate_start_page + i * (1 << 12);
-        uint64_t hpa = vtop(hva, &err);
-        qemu_log("hva: %p, hpa: 0x%lx\n", hva, hpa);
-    }
+    // for (i = 0; i < 32; i++) {
+    //     Error *err = NULL;
+    //     void* hva = migrate_start_page + i * (1 << 12);
+    //     uint64_t hpa = vtop(hva, &err);
+    //     qemu_log("hva: %p, hpa: 0x%lx\n", hva, hpa);
+    // }
 
-    const char *fname = "/dev/migrate_pages";
-    FILE *fptr = fopen(fname, "w");
-    assert(fptr);
-    size_t written_bytes = fwrite(in_buf, 1, sizeof(in_buf), fptr);
-    qemu_log("Written %ld bytes to %s\n", written_bytes, fname);
-    fclose(fptr);
+    // const char *fname = "/dev/migrate_pages";
+    // FILE *fptr = fopen(fname, "w");
+    // assert(fptr);
+    // size_t written_bytes = fwrite(in_buf, 1, sizeof(in_buf), fptr);
+    // qemu_log("Written %ld bytes to %s\n", written_bytes, fname);
+    // fclose(fptr);
 
-    for (i = 0; i < 32; i++) {
-        Error *err = NULL;
-        void* hva = migrate_start_page + i * (1 << 12);
-        uint64_t hpa = vtop(hva, &err);
-        qemu_log("hva: %p, new hpa: 0x%lx\n", hva, hpa);
-    }
+    // for (i = 0; i < 32; i++) {
+    //     Error *err = NULL;
+    //     void* hva = migrate_start_page + i * (1 << 12);
+    //     uint64_t hpa = vtop(hva, &err);
+    //     qemu_log("hva: %p, new hpa: 0x%lx\n", hva, hpa);
+    // }
 
     virtio_notify_config(vdev);
 
