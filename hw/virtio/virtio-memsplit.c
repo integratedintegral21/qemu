@@ -32,8 +32,8 @@ static inline bool is_page_aligned(void *ptr) {
     return ((uint64_t)ptr) && PAGE_OFFSET_MASK == 0;
 }
 
-static VirtIOMemSplitReq *virtio_memsplit_get_request(VirtIOMemSplit *s, VirtQueue *vq) {
-    VirtIOMemSplitReq *req = virtqueue_pop(vq, sizeof(VirtIOMemSplitReq));
+static struct VirtIOMemSplitReq *virtio_memsplit_get_request(VirtIOMemSplit *s, VirtQueue *vq) {
+    struct VirtIOMemSplitReq *req = virtqueue_pop(vq, sizeof(struct VirtIOMemSplitReq));
     if (req) {
         req->vq = vq;
         req->dev = s;
@@ -41,7 +41,7 @@ static VirtIOMemSplitReq *virtio_memsplit_get_request(VirtIOMemSplit *s, VirtQue
     return req;
 }
 
-static void virtio_memsplit_free_request(VirtIOMemSplitReq *req) {
+static void virtio_memsplit_free_request(struct VirtIOMemSplitReq *req) {
     g_free(req);
 }
 
@@ -149,107 +149,38 @@ static void init_ram_info(VirtIOMemSplit *ms) {
     }
 }
 
-static void virtio_memsplit_interrupt_timer_cb(void *opaque) {
-    qemu_log("\nQEMU timer callback\n");
-    VirtIOMemSplit *s = opaque;
-    VirtIODevice *vdev = VIRTIO_DEVICE(s);
-    // uint8_t *migrate_start_page = s->hva_ram_start_ptr;
-    // uint64_t migrate_len = 1 << 20;
-    // uint64_t vm_start = (uint64_t) migrate_start_page;
-    // int target_node = 0;
-    // uint8_t in_buf[sizeof(vm_start) + sizeof(migrate_len) + sizeof(uint32_t)];
-    // *((uint64_t*) in_buf) = vm_start;
-    // *((uint64_t*) (in_buf + sizeof(vm_start))) = migrate_len;
-    // *((uint32_t*) (in_buf + sizeof(vm_start) + sizeof(migrate_len))) = target_node;
-    // int i;
-    // qemu_log("start addr: 0x%lx, len: 0x%lx\n", vm_start, migrate_len);
-
-    // for (i = 0; i < 32; i++) {
-    //     Error *err = NULL;
-    //     void* hva = migrate_start_page + i * (1 << 12);
-    //     uint64_t hpa = vtop(hva, &err);
-    //     qemu_log("hva: %p, hpa: 0x%lx\n", hva, hpa);
-    // }
-
-    // const char *fname = "/dev/migrate_pages";
-    // FILE *fptr = fopen(fname, "w");
-    // assert(fptr);
-    // size_t written_bytes = fwrite(in_buf, 1, sizeof(in_buf), fptr);
-    // qemu_log("Written %ld bytes to %s\n", written_bytes, fname);
-    // fclose(fptr);
-
-    // for (i = 0; i < 32; i++) {
-    //     Error *err = NULL;
-    //     void* hva = migrate_start_page + i * (1 << 12);
-    //     uint64_t hpa = vtop(hva, &err);
-    //     qemu_log("hva: %p, new hpa: 0x%lx\n", hva, hpa);
-    // }
-
-    virtio_notify_config(vdev);
-
-    // timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
-}
-
-static int virtio_memsplit_handle_request(VirtIOMemSplitReq *req) {
+static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
     VirtIOMemSplit *s = req->dev;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    int i;
+    static int pfns_received = 0;
 
-    qemu_log("Request handler called\n");
+    qemu_log("GPA handler: n elements = %u\n", req->elem.out_num);
     if (req->elem.out_num > 0) {
-        VirtIOMemSplitData *buf = req->elem.out_sg[0].iov_base;
-        qemu_log("Received request of size %d\n", buf->size);
-        qemu_log("%s\n", buf->data);
+        struct VirtIOSendGpaData *buf = req->elem.out_sg[0].iov_base;
+        for (i = 0; i < 128 && buf->pfn[i] > 0; i++) {
+            pfns_received++;
+        }
     }
 
-    if (req->elem.in_num > 0) {
-        void *buf = req->elem.in_sg[0].iov_base;
-        size_t buf_len = req->elem.in_sg[0].iov_len;
-        qemu_log("Sending request of size %zu\n", buf_len);
+    qemu_log("PFNs received so far: %d\n", pfns_received);
 
-        const char *res_data = "Hello, driver!";
-        size_t res_data_len = strlen(res_data) + 1;  // terminated with \0
-
-        res_data_len = res_data_len > buf_len ? buf_len : res_data_len;  // Truncate if necessary
-        memcpy(buf, (void*)res_data, res_data_len);
-
-        virtqueue_push(req->vq, &req->elem, req->elem.in_num);
-        virtio_notify(vdev, req->vq);
-    }
-
+    virtqueue_push(req->vq, &req->elem, 128 * (sizeof *req));
+    virtio_notify(vdev, req->vq);
+  
     virtio_memsplit_free_request(req);
-
-    return 0;
 }
 
-void virtio_memsplit_handle_vq(VirtIOMemSplit *s, VirtQueue *vq) {
-    VirtIOMemSplitReq *req;
-    qemu_log("virtio_memsplit_handle_vq called\n");
-
-    bool suppress_notifications = virtio_queue_get_notification(vq);
-
-    do {
-        if (suppress_notifications) {
-            virtio_queue_set_notification(vq, 0);
-        }
-
-        while ((req = virtio_memsplit_get_request(s, vq))) {
-            if (virtio_memsplit_handle_request(req)) {
-                virtqueue_detach_element(req->vq, &req->elem, 0);
-                virtio_memsplit_free_request(req);
-                break;
-            }
-        }
-        if (suppress_notifications) {
-            virtio_queue_set_notification(vq, 1);
-        }
-    } while (!virtio_queue_empty(vq));
-
-}
-
-static void virtio_memsplit_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+static void virtio_memsplit_handle_gpa(VirtIODevice *vdev, VirtQueue *vq)
 {
-    VirtIOMemSplit *s = (VirtIOMemSplit *)vdev;
-    virtio_memsplit_handle_vq(s, vq);
+    struct VirtIOMemSplitReq *req;
+    VirtIOMemSplit *ms = (VirtIOMemSplit *)vdev;
+
+    qemu_log("Send GPA handler called\n");
+
+    while((req = virtio_memsplit_get_request(ms, vq))) {
+        virtio_memsplit_handle_gpa_req(req);
+    }
 }
 
 static uint64_t virtio_memsplit_get_features(VirtIODevice *vdev, uint64_t features, 
@@ -299,10 +230,7 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     }
 
     virtio_init(vdev, VIRTIO_ID_MEMSPLIT, 0);
-    virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_output);
-
-    ms->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_interrupt_timer_cb, ms);
-    timer_mod(ms->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 5000);
+    ms->gpa_vq = virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_gpa);
 
     qemu_log("virtio memsplit realize\n");
 }

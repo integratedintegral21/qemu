@@ -15,6 +15,8 @@
 #define TYPE_VIRTIO_MEMSPLIT "virtio-memsplit"
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMemSplit, VIRTIO_MEMSPLIT)
 
+#define VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY 128
+
 struct VirtIOMemSplitReq;
 struct GPARange;
 
@@ -23,7 +25,8 @@ struct VirtIOMemSplit {
     uint64_t flags;
     struct VirtIOMemSplitReq *rq;
     EventNotifier irqfd;
-    QEMUTimer *timer;
+    
+    struct VirtQueue *gpa_vq;
 
     // RAM utils
     uint8_t *hva_ram_start_ptr;
@@ -31,16 +34,15 @@ struct VirtIOMemSplit {
     QLIST_HEAD(, GPARange) gpa_ranges;
 };
 
-typedef struct VirtIOMemSplitReq {
+struct VirtIOMemSplitReq {
     VirtQueueElement elem;
     VirtIOMemSplit *dev;
     VirtQueue *vq;
-} VirtIOMemSplitReq;
+};
 
-typedef struct VirtIOMemSplitData {
-    uint32_t size;
-    char data[0];
-} VirtIOMemSplitData;
+struct VirtIOSendGpaData {
+    uint64_t pfn[VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY];
+};
 
 typedef struct GPARange {
     hwaddr start;
@@ -48,8 +50,6 @@ typedef struct GPARange {
 
     QLIST_ENTRY(GPARange) next;
 } GPARange;
-
-void virtio_memsplit_handle_vq(VirtIOMemSplit *s, VirtQueue *vq);
 
 #define TYPE_VIRTIO_MEMSPLIT_PCI "virtio-memsplit-pci-base"
 
