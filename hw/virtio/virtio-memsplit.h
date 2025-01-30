@@ -41,6 +41,7 @@ struct VirtIOMemSplitReq {
 };
 
 struct VirtIOSendGpaData {
+    uint64_t timestamp_ns;
     uint64_t pfns[VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY];
 };
 

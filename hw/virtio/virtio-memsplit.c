@@ -45,6 +45,19 @@ static void virtio_memsplit_free_request(struct VirtIOMemSplitReq *req) {
     g_free(req);
 }
 
+static void get_gpa_log_file_path(uint64_t timestamp_ns, char *out) {
+    const char *log_dir = "./logs";
+    static uint64_t curr_ts = 0;
+    static uint64_t i = 0;
+
+    if (timestamp_ns != curr_ts) {
+        i = 0;
+    }
+    curr_ts = timestamp_ns;
+
+    sprintf(out, "%s/gpa_hva_%lu_%lu.bin", log_dir, curr_ts, i++);
+}
+
 static void *gpa2hva(hwaddr addr, uint64_t size, Error **errp) {
     Int128 gpa_region_size;
     MemoryRegionSection mrs = memory_region_find(get_system_memory(),
@@ -155,34 +168,18 @@ static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
     int i;
     int fd;
     char f_path[128];
-    const char *log_dir = "./logs";
-    struct timespec ts;
-    uint64_t nanoseconds;
     Error *errp = NULL;
     static int pfns_received = 0;
 
-    // Get timestamp
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-        qemu_log("clock_gettime error\n");
-        goto cleanup;
-    } else {
-        nanoseconds = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-        sprintf(f_path, "%s/gpa_hva_%lu.bin", log_dir, nanoseconds);
-    }
-
-    fd = open(f_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    if (fd < 0) {
-        qemu_log("could not open the log file\n");
-        goto cleanup;
-    }
-
-    qemu_log("GPA handler: n elements = %u\n", req->elem.out_num);
     if (req->elem.out_num > 0) {
         struct VirtIOSendGpaData *buf = req->elem.out_sg[0].iov_base;
+        get_gpa_log_file_path(buf->timestamp_ns, f_path);
+        fd = open(f_path,
+            O_WRONLY | O_CREAT | O_TRUNC,
+            S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
         for (i = 0; i < 128 && buf->pfns[i] > 0; i++) {
             uint64_t gpa = buf->pfns[i] << PAGE_BITS;
             uint64_t hva = (uint64_t) gpa2hva(gpa, 1, &errp);
-            qemu_log("Writing GPA = 0x%lx, HVA = 0x%lx\n", gpa, hva);
             if (write(fd, &gpa, sizeof(gpa)) < 0) {
                 qemu_log("failed to write GPA\n");
                 goto cleanup;
@@ -193,9 +190,8 @@ static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
             }
             pfns_received++;
         }
+        close(fd);
     }
-
-    close(fd);
 
     qemu_log("PFNs received so far: %d\n", pfns_received);
 
@@ -210,8 +206,6 @@ static void virtio_memsplit_handle_gpa(VirtIODevice *vdev, VirtQueue *vq)
 {
     struct VirtIOMemSplitReq *req;
     VirtIOMemSplit *ms = (VirtIOMemSplit *)vdev;
-
-    qemu_log("Send GPA handler called\n");
 
     while((req = virtio_memsplit_get_request(ms, vq))) {
         virtio_memsplit_handle_gpa_req(req);
