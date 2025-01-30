@@ -153,18 +153,53 @@ static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
     VirtIOMemSplit *s = req->dev;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
     int i;
+    int fd;
+    char f_path[128];
+    const char *log_dir = "./logs";
+    struct timespec ts;
+    uint64_t nanoseconds;
+    Error *errp = NULL;
     static int pfns_received = 0;
+
+    // Get timestamp
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        qemu_log("clock_gettime error\n");
+        goto cleanup;
+    } else {
+        nanoseconds = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        sprintf(f_path, "%s/gpa_hva_%lu.bin", log_dir, nanoseconds);
+    }
+
+    fd = open(f_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        qemu_log("could not open the log file\n");
+        goto cleanup;
+    }
 
     qemu_log("GPA handler: n elements = %u\n", req->elem.out_num);
     if (req->elem.out_num > 0) {
         struct VirtIOSendGpaData *buf = req->elem.out_sg[0].iov_base;
-        for (i = 0; i < 128 && buf->pfn[i] > 0; i++) {
+        for (i = 0; i < 128 && buf->pfns[i] > 0; i++) {
+            uint64_t gpa = buf->pfns[i] << PAGE_BITS;
+            uint64_t hva = (uint64_t) gpa2hva(gpa, 1, &errp);
+            qemu_log("Writing GPA = 0x%lx, HVA = 0x%lx\n", gpa, hva);
+            if (write(fd, &gpa, sizeof(gpa)) < 0) {
+                qemu_log("failed to write GPA\n");
+                goto cleanup;
+            }
+            if (write(fd, &hva, sizeof(hva)) < 0) {
+                qemu_log("failed to write HVA\n");
+                goto cleanup;
+            }
             pfns_received++;
         }
     }
 
+    close(fd);
+
     qemu_log("PFNs received so far: %d\n", pfns_received);
 
+cleanup:
     virtqueue_push(req->vq, &req->elem, 128 * (sizeof *req));
     virtio_notify(vdev, req->vq);
   

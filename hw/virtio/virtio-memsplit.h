@@ -41,7 +41,7 @@ struct VirtIOMemSplitReq {
 };
 
 struct VirtIOSendGpaData {
-    uint64_t pfn[VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY];
+    uint64_t pfns[VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY];
 };
 
 typedef struct GPARange {
