@@ -169,7 +169,6 @@ static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
     int fd;
     char f_path[128];
     Error *errp = NULL;
-    static int pfns_received = 0;
 
     if (req->elem.out_num > 0) {
         struct VirtIOSendGpaData *buf = req->elem.out_sg[0].iov_base;
@@ -188,12 +187,9 @@ static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
                 qemu_log("failed to write HVA\n");
                 goto cleanup;
             }
-            pfns_received++;
         }
         close(fd);
     }
-
-    qemu_log("PFNs received so far: %d\n", pfns_received);
 
 cleanup:
     virtqueue_push(req->vq, &req->elem, 128 * (sizeof *req));
