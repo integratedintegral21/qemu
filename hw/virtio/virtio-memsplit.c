@@ -143,7 +143,7 @@ static void init_ram_info(VirtIOMemSplit *ms) {
 
             hwaddr gpa_start = sub_mr->addr;
             hwaddr gpa_end   = gpa_start + sub_mr->size - 1;
-            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
+            qemu_log("Subregion gpa range: 0x%lx - 0x%lx\n", gpa_start, gpa_end + 1);
 
             GPARange *gpa_range = malloc(sizeof(GPARange));
             gpa_range->start = gpa_start;
@@ -152,7 +152,7 @@ static void init_ram_info(VirtIOMemSplit *ms) {
             QLIST_INSERT_HEAD(&ms->gpa_ranges, gpa_range, next);
 
             uint8_t *hva = memory_region_get_ram_ptr(sub_mr);
-            qemu_log("Subregion hva range: %p - %p\n", hva, hva + sub_mr->size - 1);
+            qemu_log("Subregion hva range: %p - %p\n", hva, hva + sub_mr->size);
 
             if (ms->hva_ram_start_ptr == NULL || ms->hva_ram_start_ptr > hva) {
                 ms->hva_ram_start_ptr = hva;
@@ -234,14 +234,14 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     QLIST_FOREACH(gpa_range, &ms->gpa_ranges, next) {
         hwaddr gpa_start = gpa_range->start;
         hwaddr gpa_end = gpa_range->start + gpa_range->size - 1;
-        qemu_log("GPA: 0x%lx - 0x%lx\n", gpa_start, gpa_end);
-        qemu_log("HVA: %p - %p\n", gpa2hva(gpa_start, 1, errp), gpa2hva(gpa_end, 1, errp));
+        qemu_log("GPA: 0x%lx - 0x%lx\n", gpa_start, gpa_end + 1);
+        qemu_log("HVA: %p - %p\n", gpa2hva(gpa_start, 1, errp), gpa2hva(gpa_end, 1, errp) + 1);
         if (*errp) {
             error_setg(errp, "Failed to map GPA to HPA");
             return;
         }
 
-        qemu_log("HPA: 0x%lx - 0x%lx\n", gpa2hpa(gpa_start, errp), gpa2hpa(gpa_end, errp));
+        qemu_log("HPA: 0x%lx - 0x%lx\n", gpa2hpa(gpa_start, errp), gpa2hpa(gpa_end, errp) + 1);
         if (*errp) {
             error_setg(errp, "Failed to map GPA to HPA");
             return;
