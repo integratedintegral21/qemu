@@ -18,6 +18,11 @@
 #define PAGE_SIZE        (1 << PAGE_BITS)
 #define PAGE_OFFSET_MASK (PAGE_SIZE - 1) 
 
+#define SYSFS_BASE       "/sys/kernel/pvm_migration"
+#define START_ADDR_FILE  SYSFS_BASE "/start_addr"
+#define END_ADDR_FILE    SYSFS_BASE "/end_addr"
+#define PAGE_PLACEMENT   SYSFS_BASE "/page_placement"
+
 static const VMStateDescription vmstate_virtio_memsplit = {
     .name = "virtio-memsplit",
     .minimum_version_id = 9,
@@ -162,7 +167,8 @@ static void init_ram_info(VirtIOMemSplit *ms) {
     }
 }
 
-static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) {
+static void virtio_memsplit_handle_gpa_req(struct VirtIOMemSplitReq *req) 
+{
     VirtIOMemSplit *s = req->dev;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
     int i;
@@ -198,6 +204,26 @@ cleanup:
     virtio_memsplit_free_request(req);
 }
 
+static void virtio_memsplit_handle_migration_req(struct VirtIOMemSplitReq *req) 
+{
+    VirtIOMemSplit *s = req->dev;
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    int i;
+
+    if (req->elem.in_num > 0) {
+        struct VirtIOReceiveMigrationData *buf = req->elem.in_sg[0].iov_base;
+        for (i = 0; i < 128; i++) {
+            buf->gpas[i] = i << 12;
+            buf->nodes[i] = 1;
+        }
+    }
+
+    virtqueue_push(req->vq, &req->elem, 128 * (sizeof *req));
+    virtio_notify(vdev, req->vq);
+  
+    virtio_memsplit_free_request(req);
+}
+
 static void virtio_memsplit_handle_gpa(VirtIODevice *vdev, VirtQueue *vq)
 {
     struct VirtIOMemSplitReq *req;
@@ -208,11 +234,180 @@ static void virtio_memsplit_handle_gpa(VirtIODevice *vdev, VirtQueue *vq)
     }
 }
 
+static void virtio_memsplit_handle_migration(VirtIODevice *vdev, VirtQueue *vq)
+{
+    struct VirtIOMemSplitReq *req;
+    VirtIOMemSplit *ms = (VirtIOMemSplit *)vdev;
+
+    while((req = virtio_memsplit_get_request(ms, vq))) {
+        virtio_memsplit_handle_migration_req(req);
+    }
+}
+
 static uint64_t virtio_memsplit_get_features(VirtIODevice *vdev, uint64_t features, 
                                         Error **errp) 
 {
     qemu_log("virtio memsplit get features\n");
     return features;
+}
+
+static ssize_t read_sysfs_file(const char *path, char *buf, size_t bufsize)
+{
+    int fd;
+    ssize_t ret;
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return -1;
+    }
+
+    ret = read(fd, buf, bufsize - 1);  // leave room for null-terminator
+    if (ret < 0) {
+        perror("read");
+        close(fd);
+        return -2;
+    }
+
+    buf[ret] = '\0'; // null-terminate
+    close(fd);
+    return ret;
+}
+
+static void virtio_memsplit_migration_timer_callback(void *opaque)
+{
+    char buf[64];
+    unsigned long long start_addr = 0, end_addr = 0;
+    ssize_t nread;
+    int fd;
+    off_t file_size;
+    size_t num_pages, total_bytes;
+    int *node_ids = NULL;
+
+    /* 1) Read start_addr */
+    nread = read_sysfs_file(START_ADDR_FILE, buf, sizeof(buf));
+    if (nread < 0) {
+        fprintf(stderr, "Failed to read %s\n", START_ADDR_FILE);
+        return;
+    }
+
+    /*
+     * Attempt to parse as decimal or hex. 
+     * If you're certain it is decimal, you can just use "%llu".
+     */
+    if (strstr(buf, "0x") == buf) {
+        /* parse as hex */
+        sscanf(buf, "%llx", &start_addr);
+    } else {
+        /* parse as decimal */
+        sscanf(buf, "%llu", &start_addr);
+    }
+
+    /* 2) Read end_addr */
+    nread = read_sysfs_file(END_ADDR_FILE, buf, sizeof(buf));
+    if (nread < 0) {
+        fprintf(stderr, "Failed to read %s\n", END_ADDR_FILE);
+        return;
+    }
+
+    if (strstr(buf, "0x") == buf) {
+        sscanf(buf, "%llx", &end_addr);
+    } else {
+        sscanf(buf, "%llu", &end_addr);
+    }
+
+    printf("start_addr = 0x%llx, end_addr = 0x%llx\n",
+           start_addr, end_addr);
+
+    if (start_addr >= end_addr) {
+        fprintf(stderr, "Invalid address range!\n");
+        return;
+    }
+
+    /* 3) Compute the number of pages */
+    {
+        unsigned long long diff = end_addr - start_addr;
+        num_pages = diff / PAGE_SIZE;  // integer division
+        if (diff % PAGE_SIZE != 0) {
+            /* If end isn't page-aligned, you might want to handle partial page. */
+            ++num_pages;
+        }
+        if (num_pages == 0) {
+            fprintf(stderr, "No pages in range!\n");
+            return;
+        }
+        printf("num_pages = %zu\n", num_pages);
+    }
+
+    total_bytes = num_pages * sizeof(int);
+
+    /* 4) Read the array of NUMA node IDs from page_placement. 
+          We'll do a single read if the kernel's bin_attribute has the size set.
+          Alternatively, you can fstat and read in multiple chunks. */
+
+    /* Open the binary file. */
+    fd = open(PAGE_PLACEMENT, O_RDONLY);
+    if (fd < 0) {
+        perror("open page_placement");
+        return;
+    }
+
+    /* Optional: get the file size via fstat and check if it's large enough. */
+    {
+        struct stat st;
+        if (fstat(fd, &st) == 0) {
+            file_size = st.st_size;  /* The bin_attribute->size, if set */
+            if (file_size < (off_t)total_bytes) {
+                fprintf(stderr,
+                        "Warning: file size (%jd) < expected size (%zu)\n",
+                        (intmax_t)file_size, total_bytes);
+            }
+        }
+    }
+
+    /* Allocate space to read all the int entries. */
+    node_ids = malloc(total_bytes);
+    if (!node_ids) {
+        perror("malloc");
+        close(fd);
+        return;
+    }
+
+    /* We'll do a single read. If partial, read in a loop. */
+    {
+        size_t bytes_read = 0;
+        while (bytes_read < total_bytes) {
+            ssize_t ret = read(fd,
+                               (char *)node_ids + bytes_read,
+                               total_bytes - bytes_read);
+            if (ret < 0) {
+                perror("read");
+                free(node_ids);
+                close(fd);
+                return;
+            }
+            if (ret == 0) {
+                /* EOF reached earlier than expected */
+                printf("EOF reached: read %zu of %zu bytes\n",
+                       bytes_read, total_bytes);
+                break;
+            }
+            bytes_read += (size_t)ret;
+        }
+        printf("Read %zu bytes.\n", bytes_read);
+    }
+
+    close(fd);
+
+    /* 5) Print out the NUMA nodes. */
+    printf("NUMA layout:\n");
+    for (size_t i = 0; i < num_pages; i++) {
+        printf("  Page offset 0x%llx => Node %d\n", start_addr + (i << 12), node_ids[i]);
+    }
+
+    /* Cleanup */
+    free(node_ids);
+    return;
 }
 
 static void virtio_memsplit_realize(DeviceState *dev, Error **errp) 
@@ -256,6 +451,12 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
 
     virtio_init(vdev, VIRTIO_ID_MEMSPLIT, 0);
     ms->gpa_vq = virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_gpa);
+    ms->migration_vq = virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_migration);
+
+    ms->migration_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_migration_timer_callback, NULL);
+    int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    int64_t first_fire_ms = now_ms + 1000; // 1 second from now
+    timer_mod(ms->migration_timer, first_fire_ms);
 
     qemu_log("virtio memsplit realize\n");
 }

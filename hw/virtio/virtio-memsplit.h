@@ -4,6 +4,7 @@
 #include "qemu/osdep.h"
 
 #include "qemu/queue.h"
+#include "qemu/timer.h"
 #include "qemu/units.h"
 
 #include "hw/virtio/virtio.h"
@@ -16,6 +17,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMemSplit, VIRTIO_MEMSPLIT)
 
 #define VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY 128
+#define VIRTIO_MEMSPLIT_RECEIVE_MIGRATE_GPA_CAPACITY 128
 
 struct VirtIOMemSplitReq;
 struct GPARange;
@@ -25,8 +27,10 @@ struct VirtIOMemSplit {
     uint64_t flags;
     struct VirtIOMemSplitReq *rq;
     EventNotifier irqfd;
+    QEMUTimer *migration_timer;
     
     struct VirtQueue *gpa_vq;
+    struct VirtQueue *migration_vq;
 
     // RAM utils
     uint8_t *hva_ram_start_ptr;
@@ -43,6 +47,11 @@ struct VirtIOMemSplitReq {
 struct VirtIOSendGpaData {
     uint64_t timestamp_ns;
     uint64_t pfns[VIRTIO_MEMSPLIT_SEND_GPA_CAPACITY];
+};
+
+struct VirtIOReceiveMigrationData {
+    uint64_t gpas[VIRTIO_MEMSPLIT_RECEIVE_MIGRATE_GPA_CAPACITY];
+    uint64_t nodes[VIRTIO_MEMSPLIT_RECEIVE_MIGRATE_GPA_CAPACITY];
 };
 
 typedef struct GPARange {
