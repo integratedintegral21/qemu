@@ -18,10 +18,12 @@
 #define PAGE_SIZE        (1 << PAGE_BITS)
 #define PAGE_OFFSET_MASK (PAGE_SIZE - 1) 
 
-#define SYSFS_BASE       "/sys/kernel/pvm_migration"
-#define START_ADDR_FILE  SYSFS_BASE "/start_addr"
-#define END_ADDR_FILE    SYSFS_BASE "/end_addr"
-#define PAGE_PLACEMENT   SYSFS_BASE "/page_placement"
+#define SYSFS_BASE          "/sys/kernel/pvm_migration"
+#define START_ADDR_FILE     SYSFS_BASE "/start_addr"
+#define END_ADDR_FILE       SYSFS_BASE "/end_addr"
+#define PAGE_PLACEMENT      SYSFS_BASE "/page_placement"
+#define PID_FILE            SYSFS_BASE "/pid"
+#define TRACKING_STATE_FILE SYSFS_BASE "/state" 
 
 static const VMStateDescription vmstate_virtio_memsplit = {
     .name = "virtio-memsplit",
@@ -274,49 +276,158 @@ static ssize_t read_sysfs_file(const char *path, char *buf, size_t bufsize)
     return ret;
 }
 
-static void virtio_memsplit_migration_timer_callback(void *opaque)
+static ssize_t write_sysfs_file(const char *path, const char *buf, size_t bufsize) 
 {
-    char buf[64];
-    unsigned long long start_addr = 0, end_addr = 0;
-    ssize_t nread;
     int fd;
-    off_t file_size;
-    size_t num_pages, total_bytes;
-    int *node_ids = NULL;
+    ssize_t ret;
 
-    /* 1) Read start_addr */
+    fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        perror("open");
+        return -1;
+    }
+
+    ret = write(fd, buf, bufsize);
+    if (ret < 0) {
+        perror("write");
+        close(fd);
+        return -2;
+    }
+
+    close(fd);
+    return ret;
+}
+
+static unsigned long long get_start_addr(void) {
+    char buf[64];
+    ssize_t nread;
+    unsigned long long start_addr;
+
     nread = read_sysfs_file(START_ADDR_FILE, buf, sizeof(buf));
     if (nread < 0) {
         fprintf(stderr, "Failed to read %s\n", START_ADDR_FILE);
-        return;
+        return 0;
     }
 
-    /*
-     * Attempt to parse as decimal or hex. 
-     * If you're certain it is decimal, you can just use "%llu".
-     */
-    if (strstr(buf, "0x") == buf) {
-        /* parse as hex */
-        sscanf(buf, "%llx", &start_addr);
-    } else {
-        /* parse as decimal */
-        sscanf(buf, "%llu", &start_addr);
-    }
+    sscanf(buf, "%llx", &start_addr);
 
-    /* 2) Read end_addr */
+    return start_addr;
+}
+
+static unsigned long long get_end_addr(void) {
+    char buf[64];
+    ssize_t nread;
+    unsigned long long end_addr;
+
     nread = read_sysfs_file(END_ADDR_FILE, buf, sizeof(buf));
     if (nread < 0) {
         fprintf(stderr, "Failed to read %s\n", END_ADDR_FILE);
-        return;
+        return 0;
     }
 
-    if (strstr(buf, "0x") == buf) {
-        sscanf(buf, "%llx", &end_addr);
-    } else {
-        sscanf(buf, "%llu", &end_addr);
+    sscanf(buf, "%llx", &end_addr);
+
+    return end_addr;
+}
+
+static bool set_tracked_addr_range(unsigned long long start, unsigned long long end) {
+    char buf[64];
+    ssize_t nwrite;
+    sprintf(buf, "0x%llx", start);
+
+    nwrite = write_sysfs_file(START_ADDR_FILE, buf, sizeof(buf));
+    if (nwrite < 0) {
+        fprintf(stderr, "Failed to write %s\n", START_ADDR_FILE);
+        return false;
     }
 
-    printf("start_addr = 0x%llx, end_addr = 0x%llx\n",
+    memset(buf, 0, sizeof(buf));
+    sprintf(buf, "0x%llx", end);
+    nwrite = write_sysfs_file(END_ADDR_FILE, buf, sizeof(buf));
+    if (nwrite < 0) {
+        fprintf(stderr, "Failed to write %s\n", END_ADDR_FILE);
+        return false;
+    }
+
+    return true;
+}
+
+static bool set_tracked_pid(void) {
+    char buf[64];
+    ssize_t nwrite;
+    int pid;
+
+    pid = getpid();
+    if (pid < 0) {
+        fprintf(stderr, "getpid failed\n");
+        return false;
+    }
+
+    sprintf(buf, "%d", pid);
+    nwrite = write_sysfs_file(PID_FILE, buf, sizeof(buf));
+
+    if (nwrite < 0) {
+        fprintf(stderr, "Failed to write %s\n", PID_FILE);
+        return false;
+    }
+
+    return true;
+}
+
+static bool is_tracking(void) {
+    char buf[64];
+
+    if (read_sysfs_file(TRACKING_STATE_FILE, buf, sizeof(buf)) < 0) {
+        fprintf(stderr, "Failed to read %s\n", TRACKING_STATE_FILE);
+        return false;
+    }
+
+    if (buf[0] == '1')
+        return true;
+    
+    return false;
+}
+
+static bool stop_tracking(void) {
+    char buf[64];
+
+    sprintf(buf, "%d", 0);
+
+    if (write_sysfs_file(TRACKING_STATE_FILE, buf, sizeof(buf)) < 0) {
+        fprintf(stderr, "Failed to write %s\n", TRACKING_STATE_FILE);
+        return false;
+    }
+
+    return true;
+}
+
+static bool start_tracking(void) {
+    char buf[64];
+
+    sprintf(buf, "%d", 1);
+
+    if (write_sysfs_file(TRACKING_STATE_FILE, buf, sizeof(buf)) < 0) {
+        fprintf(stderr, "Failed to write %s\n", TRACKING_STATE_FILE);
+        return false;
+    }
+
+    return true;
+}
+
+static void virtio_memsplit_migration_timer_callback(void *opaque)
+{
+    unsigned long long start_addr = 0, end_addr = 0;
+    int fd;
+    size_t bytes_read = 0;
+    size_t num_pages, total_bytes;
+    int *node_ids = NULL;
+    struct VirtIOMemSplit *ms = opaque;
+    int64_t now_ms, next_fire_ms;
+
+    start_addr = get_start_addr();
+    end_addr = get_end_addr();
+
+    qemu_log("start_addr = 0x%llx, end_addr = 0x%llx\n",
            start_addr, end_addr);
 
     if (start_addr >= end_addr) {
@@ -324,45 +435,14 @@ static void virtio_memsplit_migration_timer_callback(void *opaque)
         return;
     }
 
-    /* 3) Compute the number of pages */
-    {
-        unsigned long long diff = end_addr - start_addr;
-        num_pages = diff / PAGE_SIZE;  // integer division
-        if (diff % PAGE_SIZE != 0) {
-            /* If end isn't page-aligned, you might want to handle partial page. */
-            ++num_pages;
-        }
-        if (num_pages == 0) {
-            fprintf(stderr, "No pages in range!\n");
-            return;
-        }
-        printf("num_pages = %zu\n", num_pages);
-    }
-
+    num_pages = (end_addr - start_addr) >> PAGE_BITS;
     total_bytes = num_pages * sizeof(int);
-
-    /* 4) Read the array of NUMA node IDs from page_placement. 
-          We'll do a single read if the kernel's bin_attribute has the size set.
-          Alternatively, you can fstat and read in multiple chunks. */
 
     /* Open the binary file. */
     fd = open(PAGE_PLACEMENT, O_RDONLY);
     if (fd < 0) {
         perror("open page_placement");
         return;
-    }
-
-    /* Optional: get the file size via fstat and check if it's large enough. */
-    {
-        struct stat st;
-        if (fstat(fd, &st) == 0) {
-            file_size = st.st_size;  /* The bin_attribute->size, if set */
-            if (file_size < (off_t)total_bytes) {
-                fprintf(stderr,
-                        "Warning: file size (%jd) < expected size (%zu)\n",
-                        (intmax_t)file_size, total_bytes);
-            }
-        }
     }
 
     /* Allocate space to read all the int entries. */
@@ -374,28 +454,25 @@ static void virtio_memsplit_migration_timer_callback(void *opaque)
     }
 
     /* We'll do a single read. If partial, read in a loop. */
-    {
-        size_t bytes_read = 0;
-        while (bytes_read < total_bytes) {
-            ssize_t ret = read(fd,
-                               (char *)node_ids + bytes_read,
-                               total_bytes - bytes_read);
-            if (ret < 0) {
-                perror("read");
-                free(node_ids);
-                close(fd);
-                return;
-            }
-            if (ret == 0) {
-                /* EOF reached earlier than expected */
-                printf("EOF reached: read %zu of %zu bytes\n",
-                       bytes_read, total_bytes);
-                break;
-            }
-            bytes_read += (size_t)ret;
+    while (bytes_read < total_bytes) {
+        ssize_t ret = read(fd,
+                           (char *)node_ids + bytes_read,
+                           total_bytes - bytes_read);
+        if (ret < 0) {
+            perror("read");
+            free(node_ids);
+            close(fd);
+            return;
         }
-        printf("Read %zu bytes.\n", bytes_read);
+        if (ret == 0) {
+            /* EOF reached earlier than expected */
+            printf("EOF reached: read %zu of %zu bytes\n",
+                   bytes_read, total_bytes);
+            break;
+        }
+        bytes_read += (size_t)ret;
     }
+    printf("Read %zu bytes.\n", bytes_read);
 
     close(fd);
 
@@ -404,6 +481,10 @@ static void virtio_memsplit_migration_timer_callback(void *opaque)
     for (size_t i = 0; i < num_pages; i++) {
         printf("  Page offset 0x%llx => Node %d\n", start_addr + (i << 12), node_ids[i]);
     }
+
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    next_fire_ms = now_ms + 1000; // 1 second from now
+    timer_mod(ms->migration_timer, next_fire_ms);
 
     /* Cleanup */
     free(node_ids);
@@ -421,6 +502,27 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
 
     if (ms->hva_ram_size == 0) {
         error_setg(errp, "Could not find guest RAM region(s)");
+        return;
+    }
+
+    if (is_tracking() && !stop_tracking()) {
+        error_setg(errp, "Could not stop tracking the previous process\n");
+        return;
+    }
+
+    if (!set_tracked_addr_range((unsigned long long) ms->hva_ram_start_ptr, 
+        (unsigned long long) (ms->hva_ram_start_ptr + ms->hva_ram_size))) {
+            error_setg(errp, "Could not set tracked address range\n");
+            return;
+    }
+
+    if (!set_tracked_pid()) {
+        error_setg(errp, "Could not set tracked PID\n");
+        return;
+    }
+
+    if (!start_tracking()) {
+        error_setg(errp, "Failed to start tracking\n");
         return;
     }
 
@@ -453,7 +555,7 @@ static void virtio_memsplit_realize(DeviceState *dev, Error **errp)
     ms->gpa_vq = virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_gpa);
     ms->migration_vq = virtio_add_queue(vdev, QUEUE_SIZE, virtio_memsplit_handle_migration);
 
-    ms->migration_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_migration_timer_callback, NULL);
+    ms->migration_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, virtio_memsplit_migration_timer_callback, ms);
     int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     int64_t first_fire_ms = now_ms + 1000; // 1 second from now
     timer_mod(ms->migration_timer, first_fire_ms);
